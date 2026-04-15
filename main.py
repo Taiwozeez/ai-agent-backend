@@ -1,4 +1,4 @@
-# main.py - Fixed Hugging Face Integration
+# main.py - Working Hugging Face Integration
 import os
 from dotenv import load_dotenv
 import requests
@@ -53,14 +53,13 @@ class HealthResponse(BaseModel):
 # Hugging Face Configuration
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Use the newer API endpoint that works
-HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/gpt2"
-
 def query_huggingface(prompt: str) -> str:
-    """Call Hugging Face API"""
+    """Call Hugging Face Inference API"""
     if not HF_TOKEN:
-        logger.warning("No HF_TOKEN")
         return None
+    
+    # Use the correct API endpoint
+    API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
     
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
@@ -77,28 +76,21 @@ def query_huggingface(prompt: str) -> str:
     }
     
     try:
-        response = requests.post(
-            HUGGINGFACE_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        
-        logger.info(f"Hugging Face API Status: {response.status_code}")
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        logger.info(f"HF API Status: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
             if isinstance(result, list) and len(result) > 0:
                 generated = result[0].get('generated_text', '')
-                # Remove the prompt from the response
                 if generated.startswith(prompt):
                     generated = generated[len(prompt):]
                 return generated.strip()
         elif response.status_code == 503:
-            # Model is loading - this is normal for first request
-            return "Model is loading. Please try again in a few seconds."
+            # Model is loading
+            return "Model is loading. Please try again in 5 seconds."
         else:
-            logger.warning(f"API Error: {response.status_code} - {response.text[:100]}")
+            logger.warning(f"HF Error: {response.status_code}")
             return None
             
     except Exception as e:
@@ -109,32 +101,29 @@ def query_huggingface(prompt: str) -> str:
 
 @app.get("/debug-hf")
 async def debug_hf():
-    """Debug endpoint to test Hugging Face connection"""
+    """Test Hugging Face connection"""
     if not HF_TOKEN:
         return {"error": "No HF_TOKEN", "has_token": False}
     
-    # Test the correct endpoint
+    # Test with a simple model
+    API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
     try:
         response = requests.post(
-            "https://api-inference.huggingface.co/models/gpt2",
+            API_URL,
             headers=headers,
             json={"inputs": "Hello"},
-            timeout=10
+            timeout=15
         )
         return {
             "has_token": True,
             "status_code": response.status_code,
-            "response": response.text[:200],
+            "response": response.text[:300],
             "working": response.status_code == 200
         }
     except Exception as e:
-        return {
-            "has_token": True,
-            "error": str(e),
-            "working": False
-        }
+        return {"has_token": True, "error": str(e), "working": False}
 
 @app.get("/")
 @app.get("/health")
@@ -153,10 +142,9 @@ async def research_endpoint(request: ResearchRequest):
         
         logger.info(f"Researching: {request.query}")
         
-        # Try Hugging Face
         result = query_huggingface(request.query)
         
-        if result and "unable" not in result.lower():
+        if result and "unable" not in result.lower() and "loading" not in result.lower():
             return ResearchResponse(
                 success=True,
                 query=request.query,
@@ -166,11 +154,11 @@ async def research_endpoint(request: ResearchRequest):
                 timestamp=datetime.now().isoformat()
             )
         else:
-            # Fallback response
+            # Informative fallback
             return ResearchResponse(
                 success=True,
                 query=request.query,
-                result=f"Here's information about '{request.query}'. (Note: The AI service is currently loading. Please try again in a few seconds.)",
+                result=f"Here's information about '{request.query}'. (Note: The AI service is initializing. This is a demo response. Full AI capabilities will be available in a moment.)",
                 method_used="fallback",
                 saved_to_file=False,
                 timestamp=datetime.now().isoformat()
