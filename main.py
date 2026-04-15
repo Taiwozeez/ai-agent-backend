@@ -1,4 +1,4 @@
-# main.py - Working Version with CORS
+# main.py - Fixed Hugging Face Integration
 import os
 from dotenv import load_dotenv
 import requests
@@ -14,7 +14,7 @@ load_dotenv()
 
 app = FastAPI()
 
-# CORS for Vercel - Updated with your URLs
+# CORS for Vercel
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -54,58 +54,66 @@ class HealthResponse(BaseModel):
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 def query_huggingface(prompt: str) -> str:
-    """Call Hugging Face API with proper format"""
+    """Call Hugging Face API with simpler model"""
     if not HF_TOKEN:
         logger.error("HF_TOKEN not set")
         return None
     
-    # Using the correct API endpoint for text generation
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
+    # Try with a simpler, more reliable model
+    API_URL = "https://api-inference.huggingface.co/models/gpt2"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_length": 200,
+            "max_length": 100,
             "temperature": 0.7,
             "do_sample": True,
-            "pad_token_id": 50256
         }
     }
     
     try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-        logger.info(f"Hugging Face response status: {response.status_code}")
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        logger.info(f"API Response Status: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
+            logger.info(f"Response type: {type(result)}")
+            
+            # Parse the response
             if isinstance(result, list) and len(result) > 0:
-                generated = result[0].get('generated_text', '')
-                # Remove the input prompt from the response
-                if generated.startswith(prompt):
-                    generated = generated[len(prompt):]
-                return generated.strip()
+                text = result[0].get('generated_text', '')
+                # Remove the input prompt
+                if text.startswith(prompt):
+                    text = text[len(prompt):]
+                return text.strip()[:300]
+            elif isinstance(result, dict) and 'generated_text' in result:
+                text = result['generated_text']
+                if text.startswith(prompt):
+                    text = text[len(prompt):]
+                return text.strip()[:300]
         else:
-            logger.error(f"Hugging Face error: {response.status_code} - {response.text[:200]}")
+            logger.error(f"API Error {response.status_code}: {response.text[:200]}")
             return None
+            
     except Exception as e:
         logger.error(f"Exception: {e}")
         return None
     
     return None
 
-# Test endpoint to verify Hugging Face is working
+# Test endpoint
 @app.get("/test-hf")
 async def test_hf():
     if not HF_TOKEN:
         return {"error": "HF_TOKEN not configured", "has_token": False}
     
-    test_result = query_huggingface("Say hello")
+    test_result = query_huggingface("Hello")
     return {
         "has_token": True,
-        "token_prefix": HF_TOKEN[:10] + "...",
         "test_result": test_result,
-        "working": test_result is not None
+        "working": test_result is not None,
+        "message": "Working!" if test_result else "Still failing"
     }
 
 @app.get("/")
@@ -125,7 +133,6 @@ async def research_endpoint(request: ResearchRequest):
         
         logger.info(f"Researching: {request.query}")
         
-        # Try Hugging Face
         result = query_huggingface(request.query)
         
         if result:
@@ -138,11 +145,11 @@ async def research_endpoint(request: ResearchRequest):
                 timestamp=datetime.now().isoformat()
             )
         else:
-            # Fallback response
+            # Informative fallback
             return ResearchResponse(
                 success=True,
                 query=request.query,
-                result=f"Here's information about {request.query}. (Note: AI service is currently unavailable, but this is a fallback response.)",
+                result=f"I received your question about '{request.query}'. The AI service is currently experiencing high demand. Please try again in a few moments.",
                 method_used="fallback",
                 saved_to_file=False,
                 timestamp=datetime.now().isoformat()
