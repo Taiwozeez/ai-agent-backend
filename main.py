@@ -1,4 +1,4 @@
-# main.py - Using the NEW google.genai library
+# main.py - Gemini with correct model names
 import os
 from dotenv import load_dotenv
 from datetime import datetime
@@ -49,10 +49,10 @@ class HealthResponse(BaseModel):
     api_configured: bool
     timestamp: str
 
-# Gemini Configuration - Using NEW library
+# Gemini Configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Initialize the new Gemini client
+# Initialize the Gemini client
 if GOOGLE_API_KEY:
     client = genai.Client(api_key=GOOGLE_API_KEY)
 else:
@@ -60,31 +60,40 @@ else:
     logger.warning("GOOGLE_API_KEY not configured")
 
 def query_gemini(prompt: str) -> str:
-    """Call Gemini API using the new google.genai library"""
+    """Call Gemini API with correct model name"""
     if not GOOGLE_API_KEY or not client:
         logger.warning("Gemini not configured")
         return None
     
-    try:
-        # Using the new API format
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",  # Using the latest model
-            contents=prompt,
-            config={
-                "temperature": 0.7,
-                "max_output_tokens": 200,
-            }
-        )
-        
-        if response and response.text:
-            return response.text.strip()
-        else:
-            logger.warning("Empty response from Gemini")
-            return None
+    # Try different model names that work with free tier
+    models_to_try = [
+        "models/gemini-1.5-flash",  # Most common free model
+        "gemini-1.5-flash",
+        "models/gemini-pro",
+        "gemini-pro",
+    ]
+    
+    for model_name in models_to_try:
+        try:
+            logger.info(f"Trying model: {model_name}")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "temperature": 0.7,
+                    "max_output_tokens": 200,
+                }
+            )
             
-    except Exception as e:
-        logger.error(f"Gemini error: {e}")
-        return None
+            if response and response.text:
+                logger.info(f"Success with model: {model_name}")
+                return response.text.strip()
+        except Exception as e:
+            logger.warning(f"Model {model_name} failed: {e}")
+            continue
+    
+    logger.error("All Gemini models failed")
+    return None
 
 def get_mock_response(query: str) -> str:
     """Fallback mock responses"""
@@ -109,17 +118,26 @@ async def debug():
             "fix": "Add GOOGLE_API_KEY in Render Environment Variables"
         }
     
-    # Test with a simple query
-    test_result = query_gemini("Say 'Hello World' in one sentence")
+    # Try to list available models
+    available_models = []
+    try:
+        # This may not work with all API keys
+        for model in client.models.list():
+            available_models.append(model.name)
+    except Exception as e:
+        available_models = [f"Could not list models: {e}"]
+    
+    # Test with a simple query using the correct format
+    test_result = query_gemini("Say 'Hello World'")
     
     return {
         "has_key": True,
         "key_prefix": GOOGLE_API_KEY[:15] + "...",
-        "library": "google.genai (new)",
-        "model": "gemini-2.0-flash",
+        "library": "google.genai",
+        "available_models": available_models[:5],
         "test_result": test_result,
         "working": test_result is not None,
-        "message": "Gemini is working!" if test_result else "Gemini test failed. Check your API key."
+        "message": "Gemini is working!" if test_result else "Gemini test failed. Check your API key permissions."
     }
 
 @app.get("/")
