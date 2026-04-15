@@ -6,13 +6,13 @@ from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Tuple
 import uvicorn
 import logging
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="AI Research API", version="1.0.0")
 
 # CORS for Vercel
 app.add_middleware(
@@ -31,6 +31,9 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# ── Models ────────────────────────────────────────────────────────────────────
+
 class ResearchRequest(BaseModel):
     query: str
 
@@ -45,110 +48,160 @@ class ResearchResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     api_configured: bool
+    model: str
     timestamp: str
 
-# Gemini API
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-def ask_gemini(question: str) -> tuple[str, str]:
-    """Ask Gemini a question and return (answer, error_message)"""
+# gemini-1.5-flash is shut down — use gemini-2.5-flash
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_URL = (
+    f"https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
+
+
+# ── Gemini helper ─────────────────────────────────────────────────────────────
+
+def ask_gemini(question: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Ask Gemini a question.
+    Returns (answer, None) on success, or (None, error_message) on failure.
+    """
     if not GOOGLE_API_KEY:
-        return None, "No API key configured"
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
-    
-    data = {
-        "contents": [{
-            "parts": [{"text": question}]
-        }]
+        return None, "GOOGLE_API_KEY is not set in environment variables."
+
+    payload = {
+        "contents": [{"parts": [{"text": question}]}],
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 2048,
+        },
     }
-    
+
     try:
-        response = requests.post(url, json=data, timeout=30)
-        
+        response = requests.post(
+            GEMINI_URL,
+            params={"key": GOOGLE_API_KEY},
+            json=payload,
+            timeout=30,
+        )
+
         if response.status_code == 200:
-            result = response.json()
-            answer = result['candidates'][0]['content']['parts'][0]['text']
+            data = response.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return None, "Gemini returned no candidates."
+            answer = candidates[0]["content"]["parts"][0]["text"]
             return answer, None
-        else:
-            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-            logger.error(f"Gemini API error: {error_msg}")
-            return None, error_msg
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Gemini exception: {error_msg}")
+
+        # Surface the real error message from Google
+        error_body = response.json() if response.content else {}
+        error_msg = (
+            error_body.get("error", {}).get("message")
+            or f"HTTP {response.status_code}: {response.text[:300]}"
+        )
+        logger.error("Gemini API error: %s", error_msg)
         return None, error_msg
+
+    except requests.exceptions.Timeout:
+        msg = "Request to Gemini timed out after 30 seconds."
+        logger.error(msg)
+        return None, msg
+    except Exception as exc:
+        logger.error("Gemini exception: %s", exc)
+        return None, str(exc)
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/health", response_model=HealthResponse)
+async def health():
+    """Simple liveness check."""
+    return HealthResponse(
+        status="active",
+        api_configured=bool(GOOGLE_API_KEY),
+        model=GEMINI_MODEL,
+        timestamp=datetime.now().isoformat(),
+    )
+
 
 @app.get("/debug")
 async def debug():
-    """Debug endpoint - shows exactly what's wrong"""
+    """
+    Diagnostic endpoint — confirms API key is present and the model responds.
+    Remove or protect this endpoint before going to production.
+    """
     if not GOOGLE_API_KEY:
         return {
             "status": "error",
-            "message": "No GOOGLE_API_KEY configured in Render Environment",
-            "fix": "Add GOOGLE_API_KEY in Render Dashboard → Environment"
+            "message": "GOOGLE_API_KEY not found in environment.",
+            "fix": "Add GOOGLE_API_KEY in Render Dashboard → Environment Variables.",
         }
-    
-    # Test the API key
-    test_result, error = ask_gemini("Say 'OK'")
-    
+
+    test_result, error = ask_gemini("Reply with the single word: OK")
+
     return {
         "status": "test_complete",
+        "model": GEMINI_MODEL,
         "api_key_configured": True,
         "api_key_prefix": GOOGLE_API_KEY[:15] + "...",
         "gemini_working": test_result is not None,
         "test_result": test_result,
         "error": error,
-        "next_steps": [
-            "If gemini_working is false, your API key is invalid or expired",
-            "Get a new key from: https://makersuite.google.com/app/apikey",
-            "Update the key in Render Environment Variables",
-            "Redeploy"
-        ]
+        "next_steps": (
+            []
+            if test_result
+            else [
+                "Your API key may be invalid or the model name has changed.",
+                "Check available models: GET https://generativelanguage.googleapis.com"
+                "/v1beta/models?key=YOUR_KEY",
+                "Current recommended model: gemini-2.5-flash",
+                "Update GEMINI_MODEL env var if needed and redeploy.",
+            ]
+        ),
     }
 
-@app.get("/health")
-async def health():
-    return HealthResponse(
-        status="active",
-        api_configured=GOOGLE_API_KEY is not None,
-        timestamp=datetime.now().isoformat()
+
+@app.post("/api/research", response_model=ResearchResponse)
+async def research(request: ResearchRequest):
+    """Main research endpoint — forwards the query to Gemini and returns the answer."""
+    query = (request.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    logger.info("Researching: %s", query)
+
+    answer, error = ask_gemini(query)
+
+    if answer:
+        return ResearchResponse(
+            success=True,
+            query=query,
+            result=answer,
+            method_used=GEMINI_MODEL,
+            saved_to_file=False,
+            timestamp=datetime.now().isoformat(),
+        )
+
+    # Return a structured error response instead of raising 500,
+    # so the frontend can display a meaningful message.
+    logger.error("Gemini failed for query '%s': %s", query, error)
+    return ResearchResponse(
+        success=False,
+        query=query,
+        result=f"AI service error: {error}",
+        method_used="error",
+        saved_to_file=False,
+        timestamp=datetime.now().isoformat(),
     )
 
-@app.post("/api/research")
-async def research(request: ResearchRequest):
-    try:
-        if not request.query or not request.query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        logger.info(f"Researching: {request.query}")
-        
-        answer, error = ask_gemini(request.query)
-        
-        if answer:
-            return ResearchResponse(
-                success=True,
-                query=request.query,
-                result=answer,
-                method_used="gemini",
-                saved_to_file=False,
-                timestamp=datetime.now().isoformat()
-            )
-        else:
-            # Return the actual error for debugging
-            return ResearchResponse(
-                success=True,
-                query=request.query,
-                result=f"AI Service Error: {error}. Please check the /debug endpoint for details.",
-                method_used="error",
-                saved_to_file=False,
-                timestamp=datetime.now().isoformat()
-            )
-            
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
