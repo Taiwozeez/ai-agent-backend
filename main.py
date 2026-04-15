@@ -46,21 +46,32 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 HUGGINGFACE_URL = "https://router.huggingface.co/v1/chat/completions"
 HUGGINGFACE_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
-# ============ COMPANY KNOWLEDGE BASE SETUP ============
+# ============ COMPANY KNOWLEDGE BASE SETUP (LAZY LOADING) ============
+# These will only load when a company question is asked
 company_collection = None
-try:
-    import chromadb
-    from chromadb.utils import embedding_functions
+company_knowledge_loaded = False
+
+def get_company_knowledge():
+    """Lazy load company knowledge - only when a company question is asked"""
+    global company_collection, company_knowledge_loaded
     
-    CHROMA_PERSIST_DIR = "./company_knowledge_db"
-    COMPANY_COLLECTION_NAME = "company_website"
+    if company_knowledge_loaded:
+        return company_collection
     
-    if os.path.exists(CHROMA_PERSIST_DIR):
-        try:
+    logger.info("Loading company knowledge base (first time, may take a moment)...")
+    
+    try:
+        import chromadb
+        from chromadb.utils import embedding_functions
+        
+        CHROMA_PERSIST_DIR = "./company_knowledge_db"
+        COMPANY_COLLECTION_NAME = "company_website"
+        
+        if os.path.exists(CHROMA_PERSIST_DIR):
             chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
             try:
                 company_collection = chroma_client.get_collection(name=COMPANY_COLLECTION_NAME)
-                logger.info(f"Loaded existing company knowledge base. Contains {company_collection.count()} chunks")
+                logger.info(f"✅ Loaded company knowledge base. Contains {company_collection.count()} chunks")
             except:
                 embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
                     model_name="all-MiniLM-L6-v2"
@@ -69,17 +80,20 @@ try:
                     name=COMPANY_COLLECTION_NAME,
                     embedding_function=embedding_fn
                 )
-                logger.info(f"Created collection with embeddings. Contains {company_collection.count()} chunks")
-        except Exception as e:
-            logger.warning(f"Error loading company knowledge base: {e}")
+                logger.info(f"✅ Created collection with embeddings. Contains {company_collection.count()} chunks")
+        else:
+            logger.warning("⚠️ Company knowledge base directory not found")
             company_collection = None
-    else:
-        logger.info("No company knowledge base found.")
+            
+    except ImportError as e:
+        logger.warning(f"⚠️ Could not import chromadb: {e}")
         company_collection = None
-        
-except Exception as e:
-    logger.warning(f"Company knowledge base not available: {e}")
-    company_collection = None
+    except Exception as e:
+        logger.warning(f"⚠️ Error loading company knowledge: {e}")
+        company_collection = None
+    
+    company_knowledge_loaded = True
+    return company_collection
 
 # Request/Response Models
 class ResearchRequest(BaseModel):
@@ -130,7 +144,8 @@ def is_company_related(query: str) -> bool:
         'support', 'customer service', 'contact', 'return', 'refund',
         'feature', 'installation', 'payment', 'delivery', 'order',
         'company', 'mission', 'vision', 'about', 'founder', 'impact',
-        'solar panel', 'home system', 'energy', 'power', 'electricity'
+        'solar panel', 'home system', 'energy', 'power', 'electricity',
+        'installment', 'monthly payment', 'finance', 'loan'
     ]
     query_lower = query.lower()
     return any(keyword in query_lower for keyword in company_keywords)
@@ -138,11 +153,12 @@ def is_company_related(query: str) -> bool:
 # Search company knowledge base
 def search_company_knowledge(query: str, top_k: int = 3) -> tuple[str, List[str]]:
     """Search the company website knowledge base"""
-    if not company_collection or company_collection.count() == 0:
+    collection = get_company_knowledge()
+    if not collection or collection.count() == 0:
         return "", []
     
     try:
-        results = company_collection.query(
+        results = collection.query(
             query_texts=[query],
             n_results=top_k
         )
@@ -209,27 +225,29 @@ Make it easy to understand and well-structured. Keep it concise (2-3 paragraphs 
 # ============ API ENDPOINTS ============
 @app.get("/", response_model=HealthResponse)
 async def root():
+    # Don't load company knowledge for health check
     return HealthResponse(
         status="healthy",
         api_configured=True,
-        company_knowledge_loaded=company_collection is not None and company_collection.count() > 0 if company_collection else False,
-        knowledge_chunks=company_collection.count() if company_collection else 0,
+        company_knowledge_loaded=False,  # Don't check on health endpoint
+        knowledge_chunks=0,
         timestamp=datetime.now().isoformat()
     )
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
+    # Simple health check - doesn't load company knowledge
     return HealthResponse(
         status="active",
         api_configured=True,
-        company_knowledge_loaded=company_collection is not None and company_collection.count() > 0 if company_collection else False,
-        knowledge_chunks=company_collection.count() if company_collection else 0,
+        company_knowledge_loaded=False,
+        knowledge_chunks=0,
         timestamp=datetime.now().isoformat()
     )
 
 @app.post("/api/research", response_model=ResearchResponse)
 async def research_endpoint(request: ResearchRequest):
-    """Main research endpoint"""
+    """Main research endpoint with lazy loading for company knowledge"""
     try:
         if not request.query or not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
@@ -243,25 +261,34 @@ async def research_endpoint(request: ResearchRequest):
         # Check if this should use company knowledge
         use_company = request.use_company_knowledge and is_company_related(request.query)
         
-        if use_company and company_collection and company_collection.count() > 0:
-            logger.info("Using company knowledge base...")
-            context, source_urls = search_company_knowledge(request.query)
+        if use_company:
+            logger.info("Company-related question detected. Loading knowledge base...")
+            # This will lazy-load the company knowledge only when needed
+            collection = get_company_knowledge()
             
-            if context:
-                prompt = f"""You are a helpful customer support assistant. Answer based ONLY on the information below.
+            if collection and collection.count() > 0:
+                logger.info("Using company knowledge base...")
+                context, source_urls = search_company_knowledge(request.query)
+                
+                if context:
+                    prompt = f"""You are a helpful customer support assistant. Answer based ONLY on the information below.
 
 QUESTION: {request.query}
 
 INFO: {context}
 
 ANSWER:"""
-                result_text = generate_with_huggingface(prompt)
-                if result_text:
-                    method_used = "company_knowledge_base"
-                    sources = source_urls
+                    result_text = generate_with_huggingface(prompt)
+                    if result_text:
+                        method_used = "company_knowledge_base"
+                        sources = source_urls
+                    else:
+                        result_text, method_used = research_with_api(request.query)
                 else:
+                    logger.info("No relevant company info found, using general knowledge")
                     result_text, method_used = research_with_api(request.query)
             else:
+                logger.info("Company knowledge not available, using general API")
                 result_text, method_used = research_with_api(request.query)
         else:
             result_text, method_used = research_with_api(request.query)
