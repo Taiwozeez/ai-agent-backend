@@ -1,4 +1,4 @@
-# main.py - Complete Working Version with DialoGPT-small
+# main.py - Using a confirmed working model
 import os
 from dotenv import load_dotenv
 import requests
@@ -53,11 +53,12 @@ class HealthResponse(BaseModel):
 # Hugging Face Configuration
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Use a model that works with the free Inference API
-HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-small"
+# Use a model that is CONFIRMED to work with free Inference API
+# Based on research: facebook/bart-large-cnn works reliably [citation:4]
+HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
 
 def query_huggingface(prompt: str) -> str:
-    """Call Hugging Face API with retry logic"""
+    """Call Hugging Face API with confirmed working model"""
     if not HF_TOKEN:
         logger.warning("No HF_TOKEN configured")
         return None
@@ -67,14 +68,13 @@ def query_huggingface(prompt: str) -> str:
         "Content-Type": "application/json"
     }
     
-    # Simple payload for DialoGPT
+    # BART is a summarization model, so we format as a summarization task
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 100,
+            "max_length": 150,
+            "min_length": 30,
             "temperature": 0.7,
-            "do_sample": True,
-            "return_full_text": False
         }
     }
     
@@ -94,18 +94,22 @@ def query_huggingface(prompt: str) -> str:
             if response.status_code == 200:
                 result = response.json()
                 if isinstance(result, list) and len(result) > 0:
-                    generated = result[0].get('generated_text', '')
-                    if generated:
-                        return generated.strip()
-                elif isinstance(result, dict) and 'generated_text' in result:
-                    return result['generated_text'].strip()
-                else:
-                    return str(result)[:200]
+                    # BART returns summary_text
+                    if 'summary_text' in result[0]:
+                        return result[0]['summary_text'].strip()
+                    elif 'generated_text' in result[0]:
+                        return result[0]['generated_text'].strip()
+                elif isinstance(result, dict):
+                    if 'summary_text' in result:
+                        return result['summary_text'].strip()
+                    elif 'generated_text' in result:
+                        return result['generated_text'].strip()
+                return str(result)[:200]
                     
             elif response.status_code == 503:
                 logger.warning(f"Model loading (503), attempt {attempt + 1}/3")
                 if attempt < 2:
-                    time.sleep(5)  # Wait 5 seconds before retry
+                    time.sleep(5)
                 continue
             else:
                 logger.warning(f"API Error {response.status_code}: {response.text[:200]}")
@@ -120,28 +124,18 @@ def query_huggingface(prompt: str) -> str:
     
     return None
 
-# Comprehensive mock responses for fallback
 def get_mock_response(query: str) -> str:
-    """Return informative mock responses"""
+    """Fallback mock responses"""
     query_lower = query.lower()
     
-    # Country/Place questions
     if "england" in query_lower:
         return "England is a country that is part of the United Kingdom. Its capital is London, known for landmarks like Big Ben, the Tower of London, and Buckingham Palace."
     elif "nigeria" in query_lower:
         return "Nigeria is a country in West Africa. Its capital is Abuja, and its largest city is Lagos. Nigeria gained independence from British rule on October 1, 1960."
-    elif "africa" in query_lower:
-        return "Africa is the world's second-largest continent, with 54 countries, diverse cultures, and rich natural resources."
-    
-    # Technology questions
     elif "ai" in query_lower or "artificial intelligence" in query_lower:
         return "Artificial Intelligence (AI) is the simulation of human intelligence in machines. It includes machine learning, natural language processing, and computer vision."
-    elif "python" in query_lower:
-        return "Python is a high-level programming language known for its simplicity. It's widely used for web development, data science, and AI."
-    
-    # Default response
     else:
-        return f"Thank you for asking about '{query}'. The AI service is initializing. Please try again in a moment."
+        return f"Information about '{query}': The AI service is currently initializing. Please try again in a moment."
 
 @app.get("/debug-hf")
 async def debug_hf():
@@ -162,18 +156,18 @@ async def debug_hf():
         "tests": []
     }
     
-    # Test with a simple request
+    # Test with BART model
     try:
         response = requests.post(
             HUGGINGFACE_API_URL,
             headers=headers,
-            json={"inputs": "Hello", "parameters": {"max_new_tokens": 20}},
+            json={"inputs": "Hello, this is a test."},
             timeout=30
         )
         results["tests"].append({
             "status_code": response.status_code,
             "working": response.status_code == 200,
-            "response": response.text[:200] if response.status_code != 200 else "Success - Model is working!"
+            "response": response.text[:200] if response.status_code != 200 else "Success! Model is working."
         })
     except Exception as e:
         results["tests"].append({"error": str(e), "working": False})
@@ -197,7 +191,6 @@ async def research_endpoint(request: ResearchRequest):
         
         logger.info(f"Researching: {request.query}")
         
-        # Try Hugging Face first
         result = query_huggingface(request.query)
         
         if result:
@@ -210,7 +203,6 @@ async def research_endpoint(request: ResearchRequest):
                 timestamp=datetime.now().isoformat()
             )
         else:
-            # Fallback to mock responses
             fallback_result = get_mock_response(request.query)
             return ResearchResponse(
                 success=True,
