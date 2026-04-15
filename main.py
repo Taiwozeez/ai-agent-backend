@@ -1,4 +1,4 @@
-# main.py - FINAL WORKING VERSION
+# main.py - With Detailed Error Logging
 import os
 from dotenv import load_dotenv
 import requests
@@ -47,13 +47,13 @@ class HealthResponse(BaseModel):
     api_configured: bool
     timestamp: str
 
-# Gemini API - Direct REST call
+# Gemini API
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-def ask_gemini(question: str) -> str:
-    """Ask Gemini a question and get answer"""
+def ask_gemini(question: str) -> tuple[str, str]:
+    """Ask Gemini a question and return (answer, error_message)"""
     if not GOOGLE_API_KEY:
-        return None
+        return None, "No API key configured"
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_API_KEY}"
     
@@ -65,15 +65,47 @@ def ask_gemini(question: str) -> str:
     
     try:
         response = requests.post(url, json=data, timeout=30)
+        
         if response.status_code == 200:
             result = response.json()
-            return result['candidates'][0]['content']['parts'][0]['text']
+            answer = result['candidates'][0]['content']['parts'][0]['text']
+            return answer, None
         else:
-            logger.error(f"API Error: {response.status_code}")
-            return None
+            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
+            logger.error(f"Gemini API error: {error_msg}")
+            return None, error_msg
     except Exception as e:
-        logger.error(f"Error: {e}")
-        return None
+        error_msg = str(e)
+        logger.error(f"Gemini exception: {error_msg}")
+        return None, error_msg
+
+@app.get("/debug")
+async def debug():
+    """Debug endpoint - shows exactly what's wrong"""
+    if not GOOGLE_API_KEY:
+        return {
+            "status": "error",
+            "message": "No GOOGLE_API_KEY configured in Render Environment",
+            "fix": "Add GOOGLE_API_KEY in Render Dashboard → Environment"
+        }
+    
+    # Test the API key
+    test_result, error = ask_gemini("Say 'OK'")
+    
+    return {
+        "status": "test_complete",
+        "api_key_configured": True,
+        "api_key_prefix": GOOGLE_API_KEY[:15] + "...",
+        "gemini_working": test_result is not None,
+        "test_result": test_result,
+        "error": error,
+        "next_steps": [
+            "If gemini_working is false, your API key is invalid or expired",
+            "Get a new key from: https://makersuite.google.com/app/apikey",
+            "Update the key in Render Environment Variables",
+            "Redeploy"
+        ]
+    }
 
 @app.get("/health")
 async def health():
@@ -89,8 +121,9 @@ async def research(request: ResearchRequest):
         if not request.query or not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
-        # Try Gemini
-        answer = ask_gemini(request.query)
+        logger.info(f"Researching: {request.query}")
+        
+        answer, error = ask_gemini(request.query)
         
         if answer:
             return ResearchResponse(
@@ -102,12 +135,12 @@ async def research(request: ResearchRequest):
                 timestamp=datetime.now().isoformat()
             )
         else:
-            # Simple fallback
+            # Return the actual error for debugging
             return ResearchResponse(
                 success=True,
                 query=request.query,
-                result=f"Here's information about '{request.query}'. The AI service is initializing. Please try again in a moment.",
-                method_used="fallback",
+                result=f"AI Service Error: {error}. Please check the /debug endpoint for details.",
+                method_used="error",
                 saved_to_file=False,
                 timestamp=datetime.now().isoformat()
             )
