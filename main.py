@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 # ============ API CONFIGURATION ============
 HF_TOKEN = os.getenv("HF_TOKEN")
-HUGGINGFACE_URL = "https://router.huggingface.co/v1/chat/completions"
+# Using the correct Inference API endpoint
+HUGGINGFACE_URL = "https://api-inference.huggingface.co/models/"
 HUGGINGFACE_MODEL = "microsoft/DialoGPT-medium"  # Fast and reliable model
 
 # Request/Response Models
@@ -84,47 +85,98 @@ def save_to_file(data: str) -> str:
 
 # ============ HUGGING FACE API ============
 def generate_with_huggingface(prompt: str) -> str:
-    """Generate answer using Hugging Face API"""
+    """Generate answer using Hugging Face Inference API"""
     if not HF_TOKEN:
         logger.warning("HF_TOKEN not found")
         return None
     
+    # Use the correct endpoint for the model
+    API_URL = f"{HUGGINGFACE_URL}{HUGGINGFACE_MODEL}"
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "application/json"
     }
     
+    # Format payload correctly for text generation
     payload = {
-        "model": HUGGINGFACE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,
-        "temperature": 0.7
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 150,
+            "temperature": 0.7,
+            "do_sample": True,
+            "return_full_text": False
+        }
     }
     
     try:
-        response = requests.post(HUGGINGFACE_URL, headers=headers, json=payload, timeout=30)
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=45)
         
         if response.status_code == 200:
             result = response.json()
-            return result["choices"][0]["message"]["content"]
+            # Handle different response formats
+            if isinstance(result, list) and len(result) > 0:
+                if 'generated_text' in result[0]:
+                    return result[0]['generated_text'].strip()
+                elif 'content' in result[0]:
+                    return result[0]['content'].strip()
+            elif isinstance(result, dict):
+                if 'generated_text' in result:
+                    return result['generated_text'].strip()
+                elif 'response' in result:
+                    return result['response'].strip()
+            
+            # Fallback: return the raw result as string
+            return str(result)[:500]
         else:
-            logger.warning(f"Hugging Face error: {response.status_code}")
+            logger.warning(f"Hugging Face error: {response.status_code} - {response.text[:200]}")
+            
+            # Try fallback model if main model fails
+            if HUGGINGFACE_MODEL != "gpt2":
+                logger.info("Trying fallback model: gpt2")
+                return generate_with_fallback(prompt)
             return None
     except Exception as e:
         logger.warning(f"Hugging Face exception: {e}")
         return None
 
+def generate_with_fallback(prompt: str) -> str:
+    """Fallback to gpt2 model"""
+    try:
+        API_URL = f"{HUGGINGFACE_URL}gpt2"
+        headers = {
+            "Authorization": f"Bearer {HF_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "inputs": prompt,
+            "parameters": {
+                "max_new_tokens": 100,
+                "temperature": 0.7,
+                "do_sample": True,
+                "return_full_text": False
+            }
+        }
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list) and len(result) > 0 and 'generated_text' in result[0]:
+                return result[0]['generated_text'].strip()
+    except:
+        pass
+    return None
+
 # ============ MAIN RESEARCH FUNCTION ============
 def research_with_api(query: str) -> tuple[str, str]:
     """Research using Hugging Face API"""
     
-    prompt = f"""Please provide a clear, concise answer about: {query}
-    
-Keep it short and informative (2-3 sentences max)."""
+    prompt = f"Please answer concisely: {query}"
     
     result = generate_with_huggingface(prompt)
     if result:
-        return result, "huggingface"
+        # Clean up the response
+        result = result.replace(prompt, '').strip()
+        if result:
+            return result, "huggingface"
     
     return "I'm currently unable to connect to the AI service. Please try again in a few moments.", "error"
 
