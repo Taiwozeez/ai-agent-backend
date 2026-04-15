@@ -1,4 +1,4 @@
-# main.py - Working Hugging Face Integration
+# main.py - Complete Fixed Version
 import os
 from dotenv import load_dotenv
 import requests
@@ -9,12 +9,13 @@ from pydantic import BaseModel
 from typing import Optional
 import uvicorn
 import logging
+import time
 
 load_dotenv()
 
 app = FastAPI()
 
-# CORS for Vercel
+# CORS for Vercel - Fixed (no wildcards, use explicit or "*" for testing)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -22,7 +23,6 @@ app.add_middleware(
         "http://localhost:3001",
         "https://ai-agent-taiwo-adelaja.vercel.app",
         "https://ai-agent-taiwo-adelaja-5a2et6rb0-taiwo-adelajas-projects.vercel.app",
-        "https://*.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -53,77 +53,111 @@ class HealthResponse(BaseModel):
 # Hugging Face Configuration
 HF_TOKEN = os.getenv("HF_TOKEN")
 
+# Use a proper instruction model (not gpt2)
+HUGGINGFACE_API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
+
 def query_huggingface(prompt: str) -> str:
-    """Call Hugging Face Inference API"""
+    """Call Hugging Face API with retry logic and proper formatting"""
     if not HF_TOKEN:
+        logger.warning("No HF_TOKEN configured")
         return None
-    
-    # Use the correct API endpoint
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
     
     headers = {
         "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "application/json"
     }
     
+    # Format prompt properly for instruction models
+    formatted_prompt = f"Answer this question clearly and concisely: {prompt}"
+    
     payload = {
-        "inputs": prompt,
+        "inputs": formatted_prompt,
         "parameters": {
-            "max_length": 100,
+            "max_new_tokens": 150,  # Fixed: use max_new_tokens, not max_length
             "temperature": 0.7,
             "do_sample": True,
         }
     }
     
-    try:
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        logger.info(f"HF API Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                generated = result[0].get('generated_text', '')
-                if generated.startswith(prompt):
-                    generated = generated[len(prompt):]
-                return generated.strip()
-        elif response.status_code == 503:
-            # Model is loading
-            return "Model is loading. Please try again in 5 seconds."
-        else:
-            logger.warning(f"HF Error: {response.status_code}")
-            return None
+    # Retry logic for 503 (model loading)
+    for attempt in range(3):
+        try:
+            logger.info(f"Attempt {attempt + 1}: Calling Hugging Face API")
+            response = requests.post(
+                HUGGINGFACE_API_URL,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
             
-    except Exception as e:
-        logger.error(f"Exception: {e}")
-        return None
+            logger.info(f"Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                result = response.json()
+                if isinstance(result, list) and len(result) > 0:
+                    generated = result[0].get('generated_text', '')
+                    # Clean up the response
+                    if generated.startswith(formatted_prompt):
+                        generated = generated[len(formatted_prompt):]
+                    return generated.strip()
+                elif isinstance(result, dict) and 'generated_text' in result:
+                    return result['generated_text'].strip()
+                    
+            elif response.status_code == 503:
+                logger.warning(f"Model loading (503), attempt {attempt + 1}/3")
+                if attempt < 2:  # Don't sleep on last attempt
+                    time.sleep(3)  # Wait 3 seconds before retry
+                continue
+            else:
+                logger.warning(f"API Error {response.status_code}: {response.text[:200]}")
+                return None
+                
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout on attempt {attempt + 1}")
+            continue
+        except Exception as e:
+            logger.error(f"Exception on attempt {attempt + 1}: {e}")
+            continue
     
     return None
 
 @app.get("/debug-hf")
 async def debug_hf():
-    """Test Hugging Face connection"""
+    """Debug endpoint to test Hugging Face connection"""
     if not HF_TOKEN:
-        return {"error": "No HF_TOKEN", "has_token": False}
+        return {
+            "error": "No HF_TOKEN configured on Render",
+            "has_token": False,
+            "fix": "Add HF_TOKEN in Render Environment Variables"
+        }
     
-    # Test with a simple model
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
+    # Test the correct endpoint
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     
+    results = {
+        "has_token": True,
+        "token_prefix": HF_TOKEN[:10] + "...",
+        "model": HUGGINGFACE_API_URL,
+        "tests": []
+    }
+    
+    # Test with a simple request
     try:
         response = requests.post(
-            API_URL,
+            HUGGINGFACE_API_URL,
             headers=headers,
-            json={"inputs": "Hello"},
+            json={"inputs": "Say hello", "parameters": {"max_new_tokens": 20}},
             timeout=15
         )
-        return {
-            "has_token": True,
+        results["tests"].append({
             "status_code": response.status_code,
-            "response": response.text[:300],
-            "working": response.status_code == 200
-        }
+            "working": response.status_code == 200,
+            "response": response.text[:200] if response.status_code != 200 else "Success"
+        })
     except Exception as e:
-        return {"has_token": True, "error": str(e), "working": False}
+        results["tests"].append({"error": str(e), "working": False})
+    
+    return results
 
 @app.get("/")
 @app.get("/health")
@@ -142,9 +176,10 @@ async def research_endpoint(request: ResearchRequest):
         
         logger.info(f"Researching: {request.query}")
         
+        # Try Hugging Face
         result = query_huggingface(request.query)
         
-        if result and "unable" not in result.lower() and "loading" not in result.lower():
+        if result:
             return ResearchResponse(
                 success=True,
                 query=request.query,
@@ -154,11 +189,11 @@ async def research_endpoint(request: ResearchRequest):
                 timestamp=datetime.now().isoformat()
             )
         else:
-            # Informative fallback
+            # Informative fallback while AI is initializing
             return ResearchResponse(
                 success=True,
                 query=request.query,
-                result=f"Here's information about '{request.query}'. (Note: The AI service is initializing. This is a demo response. Full AI capabilities will be available in a moment.)",
+                result=f"📚 Information about '{request.query}':\n\nThe AI service is currently initializing. Please try again in 10-15 seconds. The first request may take longer as the model loads into memory.",
                 method_used="fallback",
                 saved_to_file=False,
                 timestamp=datetime.now().isoformat()
