@@ -1,4 +1,4 @@
-# main.py - Gemini Version (Reliable!)
+# main.py - Gemini Working Version
 import os
 from dotenv import load_dotenv
 from datetime import datetime
@@ -52,29 +52,43 @@ class HealthResponse(BaseModel):
 # Gemini Configuration
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Initialize Gemini
+# Initialize Gemini with proper configuration
 if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
-    # Use Gemini 1.5 Flash (fast and free)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        # Try different model versions
+        models_available = genai.list_models()
+        logger.info("Available models:")
+        for m in models_available:
+            logger.info(f"  {m.name}")
+        
+        # Use gemini-pro (more stable than 1.5-flash)
+        model = genai.GenerativeModel('gemini-pro')
+        logger.info("Gemini initialized successfully with gemini-pro")
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini: {e}")
+        model = None
 else:
     model = None
     logger.warning("GOOGLE_API_KEY not configured")
 
 def query_gemini(prompt: str) -> str:
-    """Call Gemini API"""
+    """Call Gemini API with proper error handling"""
     if not GOOGLE_API_KEY or not model:
         logger.warning("Gemini not configured")
         return None
     
     try:
-        # Add instruction for concise answers
-        formatted_prompt = f"Please provide a clear, concise answer (2-3 sentences max): {prompt}"
-        response = model.generate_content(formatted_prompt)
+        # Simple prompt without extra instructions
+        response = model.generate_content(prompt)
         
-        if response and response.text:
+        if response and hasattr(response, 'text') and response.text:
             return response.text.strip()
+        elif response and hasattr(response, 'parts'):
+            # Alternative response format
+            return response.parts[0].text.strip()
         else:
+            logger.warning(f"Empty response from Gemini")
             return None
             
     except Exception as e:
@@ -89,8 +103,6 @@ def get_mock_response(query: str) -> str:
         return "England is a country that is part of the United Kingdom. Its capital is London, known for landmarks like Big Ben and Buckingham Palace."
     elif "nigeria" in query_lower:
         return "Nigeria is a country in West Africa. Its capital is Abuja, and its largest city is Lagos. Nigeria gained independence on October 1, 1960."
-    elif "africa" in query_lower:
-        return "Africa is the world's second-largest continent, with 54 countries, diverse cultures, and rich natural resources."
     elif "ai" in query_lower or "artificial intelligence" in query_lower:
         return "Artificial Intelligence (AI) is the simulation of human intelligence in machines. It includes machine learning, natural language processing, and computer vision."
     else:
@@ -106,15 +118,25 @@ async def debug():
             "fix": "Add GOOGLE_API_KEY in Render Environment Variables"
         }
     
-    # Test Gemini
-    test_result = query_gemini("Say hello in one word")
+    # Test with a simple query
+    test_result = query_gemini("Say 'Hello World'")
+    
+    # Also try to list available models
+    available_models = []
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+    except:
+        pass
     
     return {
         "has_key": True,
-        "key_prefix": GOOGLE_API_KEY[:10] + "...",
-        "model": "gemini-1.5-flash",
+        "key_prefix": GOOGLE_API_KEY[:15] + "...",
+        "models_available": available_models[:5],
         "test_result": test_result,
-        "working": test_result is not None
+        "working": test_result is not None,
+        "message": "Gemini is working!" if test_result else "Gemini test failed. Check API key permissions."
     }
 
 @app.get("/")
