@@ -1,4 +1,4 @@
-# main.py
+# main.py - Without Company Knowledge
 import os
 from dotenv import load_dotenv
 import requests
@@ -22,7 +22,7 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# Configure CORS for Next.js - FIXED for Vercel deployment
+# Configure CORS for Next.js
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -44,31 +44,12 @@ logger = logging.getLogger(__name__)
 # ============ API CONFIGURATION ============
 HF_TOKEN = os.getenv("HF_TOKEN")
 HUGGINGFACE_URL = "https://router.huggingface.co/v1/chat/completions"
-HUGGINGFACE_MODEL = "microsoft/DialoGPT-medium"  # Changed to faster model
-
-# ============ COMPANY KNOWLEDGE BASE - DISABLED ============
-# Company knowledge is temporarily disabled to prevent memory issues on free tier
-company_collection = None
-company_knowledge_loaded = False
-
-def get_company_knowledge():
-    """Company knowledge disabled - returns None"""
-    logger.info("Company knowledge is currently disabled")
-    return None
-
-def is_company_related(query: str) -> bool:
-    """Company knowledge disabled - always returns False"""
-    return False
-
-def search_company_knowledge(query: str, top_k: int = 3):
-    """Company knowledge disabled - returns empty"""
-    return "", []
+HUGGINGFACE_MODEL = "microsoft/DialoGPT-medium"  # Fast and reliable model
 
 # Request/Response Models
 class ResearchRequest(BaseModel):
     query: str
     use_fallback: Optional[bool] = True
-    use_company_knowledge: Optional[bool] = False  # Disabled by default
 
 class ResearchResponse(BaseModel):
     success: bool
@@ -77,13 +58,10 @@ class ResearchResponse(BaseModel):
     method_used: str
     saved_to_file: bool
     timestamp: str
-    sources: Optional[List[str]] = None
 
 class HealthResponse(BaseModel):
     status: str
     api_configured: bool
-    company_knowledge_loaded: bool
-    knowledge_chunks: int
     timestamp: str
 
 # Helper function to save to file
@@ -119,7 +97,7 @@ def generate_with_huggingface(prompt: str) -> str:
     payload = {
         "model": HUGGINGFACE_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500,  # Reduced for faster responses
+        "max_tokens": 500,
         "temperature": 0.7
     }
     
@@ -138,11 +116,11 @@ def generate_with_huggingface(prompt: str) -> str:
 
 # ============ MAIN RESEARCH FUNCTION ============
 def research_with_api(query: str) -> tuple[str, str]:
-    """Research using available APIs"""
+    """Research using Hugging Face API"""
     
     prompt = f"""Please provide a clear, concise answer about: {query}
     
-Keep it short (2-3 sentences max)."""
+Keep it short and informative (2-3 sentences max)."""
     
     result = generate_with_huggingface(prompt)
     if result:
@@ -156,8 +134,6 @@ async def root():
     return HealthResponse(
         status="healthy",
         api_configured=True,
-        company_knowledge_loaded=False,
-        knowledge_chunks=0,
         timestamp=datetime.now().isoformat()
     )
 
@@ -166,21 +142,19 @@ async def health_check():
     return HealthResponse(
         status="active",
         api_configured=True,
-        company_knowledge_loaded=False,
-        knowledge_chunks=0,
         timestamp=datetime.now().isoformat()
     )
 
 @app.post("/api/research", response_model=ResearchResponse)
 async def research_endpoint(request: ResearchRequest):
-    """Main research endpoint - company knowledge disabled"""
+    """Main research endpoint"""
     try:
         if not request.query or not request.query.strip():
             raise HTTPException(status_code=400, detail="Query cannot be empty")
         
         logger.info(f"Research request: {request.query[:50]}...")
         
-        # Always use general API (company knowledge disabled)
+        # Get research result
         result_text, method_used = research_with_api(request.query)
         
         # Save to file
@@ -192,8 +166,7 @@ async def research_endpoint(request: ResearchRequest):
             result=result_text,
             method_used=method_used,
             saved_to_file=True,
-            timestamp=datetime.now().isoformat(),
-            sources=None
+            timestamp=datetime.now().isoformat()
         )
         
     except Exception as e:
