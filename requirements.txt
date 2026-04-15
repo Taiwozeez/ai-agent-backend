@@ -1,8 +1,4 @@
 fastapi
 uvicorn
 python-dotenv
-huggingface-hub
-chromadb
-sentence-transformers
-beautifulsoup4
 requests
