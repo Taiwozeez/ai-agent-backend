@@ -1,10 +1,8 @@
-langchain 
-wikipedia 
-langchain-community 
-langchain-openai
-langchain-anthropic
+fastapi
+uvicorn
 python-dotenv
-pydantic
-duckduckgo-search
-langchain-google-search
-langchain_google_genai
+huggingface-hub
+chromadb
+sentence-transformers
+beautifulsoup4
+requests
