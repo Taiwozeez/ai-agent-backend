@@ -1,4 +1,4 @@
-# main.py - Gemini Working Version
+# main.py - Using the NEW google.genai library
 import os
 from dotenv import load_dotenv
 from datetime import datetime
@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Optional
 import uvicorn
 import logging
-import google.generativeai as genai
+from google import genai
 
 load_dotenv()
 
@@ -49,46 +49,37 @@ class HealthResponse(BaseModel):
     api_configured: bool
     timestamp: str
 
-# Gemini Configuration
+# Gemini Configuration - Using NEW library
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Initialize Gemini with proper configuration
+# Initialize the new Gemini client
 if GOOGLE_API_KEY:
-    try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        # Try different model versions
-        models_available = genai.list_models()
-        logger.info("Available models:")
-        for m in models_available:
-            logger.info(f"  {m.name}")
-        
-        # Use gemini-pro (more stable than 1.5-flash)
-        model = genai.GenerativeModel('gemini-pro')
-        logger.info("Gemini initialized successfully with gemini-pro")
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini: {e}")
-        model = None
+    client = genai.Client(api_key=GOOGLE_API_KEY)
 else:
-    model = None
+    client = None
     logger.warning("GOOGLE_API_KEY not configured")
 
 def query_gemini(prompt: str) -> str:
-    """Call Gemini API with proper error handling"""
-    if not GOOGLE_API_KEY or not model:
+    """Call Gemini API using the new google.genai library"""
+    if not GOOGLE_API_KEY or not client:
         logger.warning("Gemini not configured")
         return None
     
     try:
-        # Simple prompt without extra instructions
-        response = model.generate_content(prompt)
+        # Using the new API format
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",  # Using the latest model
+            contents=prompt,
+            config={
+                "temperature": 0.7,
+                "max_output_tokens": 200,
+            }
+        )
         
-        if response and hasattr(response, 'text') and response.text:
+        if response and response.text:
             return response.text.strip()
-        elif response and hasattr(response, 'parts'):
-            # Alternative response format
-            return response.parts[0].text.strip()
         else:
-            logger.warning(f"Empty response from Gemini")
+            logger.warning("Empty response from Gemini")
             return None
             
     except Exception as e:
@@ -119,24 +110,16 @@ async def debug():
         }
     
     # Test with a simple query
-    test_result = query_gemini("Say 'Hello World'")
-    
-    # Also try to list available models
-    available_models = []
-    try:
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-    except:
-        pass
+    test_result = query_gemini("Say 'Hello World' in one sentence")
     
     return {
         "has_key": True,
         "key_prefix": GOOGLE_API_KEY[:15] + "...",
-        "models_available": available_models[:5],
+        "library": "google.genai (new)",
+        "model": "gemini-2.0-flash",
         "test_result": test_result,
         "working": test_result is not None,
-        "message": "Gemini is working!" if test_result else "Gemini test failed. Check API key permissions."
+        "message": "Gemini is working!" if test_result else "Gemini test failed. Check your API key."
     }
 
 @app.get("/")
